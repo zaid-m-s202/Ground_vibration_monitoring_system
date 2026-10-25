@@ -38,8 +38,8 @@
 // WIFI
 // =====================================================
 
-const char* WIFI_SSID = "PT";
-const char* WIFI_PASSWORD = "zaidzaid";
+const char* WIFI_SSID = "WIFI_NAME";
+const char* WIFI_PASSWORD = "WIFI_PASSWORD";
 
 // =====================================================
 // ML SERVER  -- change ML_SERVER_IP to your PC LAN IP
