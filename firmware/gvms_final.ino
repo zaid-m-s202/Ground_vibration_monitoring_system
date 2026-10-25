@@ -32,6 +32,7 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 #include <ArduinoJson.h>
+#include <ESPmDNS.h>
 
 // =====================================================
 // WIFI
@@ -44,7 +45,8 @@ const char* WIFI_PASSWORD = "zaidzaid";
 // ML SERVER  -- change ML_SERVER_IP to your PC LAN IP
 // =====================================================
 
-const char* ML_SERVER_IP   = "10.78.160.117";    // PC WiFi IP  <-- update if your IP changes
+const char* ML_SERVER_HOST = "gvms.local";   // mDNS hostname -- no IP needed ever again
+const char* ML_SERVER_IP_FALLBACK = "172.16.55.213"; // fallback if mDNS fails
 
 const int   ML_SERVER_PORT = 5000;
 
@@ -295,6 +297,17 @@ void updateOLED() {
 // =====================================================
 
 // -- mlHttpTask: runs on Core 0, sends 10-second batch, gets label back --------
+// -- Resolve ML server address via mDNS, fall back to hardcoded IP -----------
+String resolveMLServer() {
+  IPAddress ip;
+  if (MDNS.queryHost(ML_SERVER_HOST, ip, 2000)) {
+    Serial.print("[mDNS] Resolved gvms.local -> "); Serial.println(ip.toString());
+    return ip.toString();
+  }
+  Serial.println("[mDNS] Resolve failed, using fallback IP");
+  return String(ML_SERVER_IP_FALLBACK);
+}
+
 void mlHttpTask(void* param) {
   for (;;) {
     if (mlSendPending && !mlTaskBusy) {
@@ -322,7 +335,8 @@ void mlHttpTask(void* param) {
         }
         body += "]}";
 
-        String url = String("http://") + ML_SERVER_IP + ":" + ML_SERVER_PORT + "/api/infer/batch";
+        String mlHost = resolveMLServer();
+        String url = String("http://") + mlHost + ":" + ML_SERVER_PORT + "/api/infer/batch";
 
         HTTPClient http;
         http.begin(url);
@@ -401,10 +415,10 @@ void mlHttpTask(void* param) {
   }
 }
 
-// Called from sensor loop when batch is full — copies buffer, signals task
+// Called from sensor loop when batch is full � copies buffer, signals task
 void triggerMLSend() {
   if (mlTaskBusy) {
-    // Task still busy from last batch — skip, restart recording
+    // Task still busy from last batch � skip, restart recording
     batchRecording = true;
     batchCount     = 0;
     batchStartMs   = millis();
@@ -586,113 +600,158 @@ String webpage() {
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>GVMS Ground Vibration Monitor</title>
 <style>
+@import url('https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Space+Grotesk:wght@400;700;800&display=swap');
 *{box-sizing:border-box;margin:0;padding:0;}
-:root{--bg:#0d1117;--card:#161b22;--border:#30363d;--text:#c9d1d9;--muted:#8b949e;
-  --accent:#58a6ff;--green:#3fb950;--red:#f85149;--orange:#d29922;}
-body{font-family:'Segoe UI',system-ui,sans-serif;background:var(--bg);color:var(--text);padding-bottom:60px;}
-header{background:#161b22;border-bottom:2px solid #21262d;padding:14px 24px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;}
-header h1{color:var(--accent);font-size:1.2rem;font-weight:700;}
-header .sub{color:var(--muted);font-size:.78rem;margin-top:2px;}
+:root{--blk:#000;--wht:#fff;--yel:#ffe600;--red:#ff2b2b;--grn:#00ff6a;--blu:#0057ff;--b:3px solid #000;}
+body{font-family:'Space Grotesk',system-ui,sans-serif;background:var(--wht);color:var(--blk);padding-bottom:60px;}
+
+/* -- HEADER -- */
+header{background:var(--blk);border-bottom:5px solid var(--yel);padding:14px 24px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;}
+header h1{color:var(--yel);font-size:1.15rem;font-weight:800;letter-spacing:3px;text-transform:uppercase;font-family:'Space Grotesk',sans-serif;}
+header .sub{color:#aaa;font-family:'Space Mono',monospace;font-size:.7rem;margin-top:3px;letter-spacing:1px;}
 .hright{display:flex;align-items:center;gap:8px;flex-wrap:wrap;}
-.badge{padding:3px 10px;border-radius:20px;font-size:.72rem;font-weight:700;}
-.bg{background:#1a3a2a;color:var(--green);border:1px solid #2ea04330;}
-.br{background:#3a1a1a;color:var(--red);border:1px solid #f8514930;}
-.bb{background:#1a2a3a;color:var(--accent);border:1px solid #58a6ff30;}
-.hbtn{background:#21262d;border:1px solid var(--border);color:var(--text);padding:5px 12px;border-radius:7px;cursor:pointer;font-size:.78rem;font-family:inherit;}
-.hbtn:hover{background:#30363d;}
-.conn-warn{background:#3a1a00;color:#f97316;text-align:center;padding:6px;font-size:.8rem;font-weight:600;display:none;}
+.badge{padding:4px 10px;font-size:.68rem;font-weight:700;font-family:'Space Mono',monospace;text-transform:uppercase;border:2px solid var(--blk);box-shadow:2px 2px 0 var(--blk);}
+.bg{background:var(--grn);color:var(--blk);}
+.br{background:var(--red);color:var(--wht);}
+.bb{background:var(--yel);color:var(--blk);}
+.hbtn{background:var(--wht);border:2px solid var(--blk);color:var(--blk);padding:5px 12px;cursor:pointer;font-size:.72rem;font-family:'Space Mono',monospace;font-weight:700;text-transform:uppercase;box-shadow:2px 2px 0 var(--blk);}
+.hbtn:hover{background:var(--yel);}
+
+/* -- TICKER -- */
+.ticker{background:var(--yel);border-top:3px solid var(--blk);border-bottom:3px solid var(--blk);padding:5px 0;overflow:hidden;white-space:nowrap;}
+.ticker-inner{display:inline-block;animation:tick 24s linear infinite;font-family:'Space Mono',monospace;font-size:.7rem;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:var(--blk);}
+@keyframes tick{0%{transform:translateX(110vw)}100%{transform:translateX(-100%)}}
+
+/* -- CONNECTION WARN -- */
+.conn-warn{background:var(--red);color:var(--wht);text-align:center;padding:7px;font-size:.8rem;font-weight:700;display:none;font-family:'Space Mono',monospace;text-transform:uppercase;letter-spacing:1px;border-bottom:3px solid var(--blk);}
 .conn-warn.show{display:block;}
-.container{max-width:1180px;margin:auto;padding:14px 18px;}
-.tabs{display:flex;gap:6px;margin-bottom:14px;overflow-x:auto;padding-bottom:2px;}
-.tab{padding:8px 18px;border:1px solid var(--border);border-radius:7px;background:var(--card);color:var(--muted);cursor:pointer;font-size:.82rem;font-weight:600;white-space:nowrap;transition:all .15s;}
-.tab:hover{color:var(--text);}
-.tab.active{background:var(--accent);color:#0d1117;border-color:var(--accent);}
+
+/* -- LAYOUT -- */
+.container{max-width:1180px;margin:auto;padding:20px 18px;}
+.tabs{display:flex;gap:0;margin-bottom:20px;overflow-x:auto;border:3px solid var(--blk);}
+.tab{padding:10px 22px;background:var(--wht);color:#666;cursor:pointer;font-size:.78rem;font-weight:700;white-space:nowrap;font-family:'Space Mono',monospace;text-transform:uppercase;letter-spacing:1px;border-right:3px solid var(--blk);transition:background .1s;}
+.tab:last-child{border-right:none;}
+.tab:hover{background:#f0f0f0;}
+.tab.active{background:var(--blk);color:var(--yel);}
 .pane{display:none;}
 .pane.active{display:block;}
-.g4{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:12px;}
-.g2{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px;}
+
+/* -- GRIDS -- */
+.g4{display:grid;grid-template-columns:repeat(4,1fr);gap:0;margin-bottom:20px;border:3px solid var(--blk);}
+.g2{display:grid;grid-template-columns:1fr 1fr;gap:0;margin-bottom:20px;border:3px solid var(--blk);}
 @media(max-width:700px){.g4{grid-template-columns:1fr 1fr;}.g2{grid-template-columns:1fr;}}
 @media(max-width:400px){.g4{grid-template-columns:1fr;}}
-.card{background:var(--card);border:1px solid var(--border);border-radius:9px;padding:14px;}
-.card h3{color:var(--muted);font-size:.72rem;font-weight:600;text-transform:uppercase;letter-spacing:.5px;margin-bottom:5px;}
-.bv{font-size:1.75rem;font-weight:800;}
-.statusbar{padding:11px 18px;border-radius:9px;text-align:center;font-size:1.1rem;font-weight:800;margin-bottom:12px;border:2px solid;}
-.statusbar.normal{background:#0d2018;color:var(--green);border-color:#2ea04340;}
-.statusbar.danger{background:#2d1010;color:var(--red);border-color:#f8514940;animation:blink .9s infinite;}
-@keyframes blink{50%{opacity:.6;}}
-.ml-panel{background:var(--card);border:2px solid var(--accent);border-radius:11px;padding:16px;margin-bottom:12px;}
-.ml-panel .mph{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px;margin-bottom:10px;}
-.ml-panel .mph h2{color:var(--accent);font-size:.87rem;font-weight:700;}
-.ml-panel .mph .algo{color:var(--muted);font-size:.72rem;}
-.ml-label{font-size:2.2rem;font-weight:800;color:var(--green);text-align:center;padding:6px 0 3px;}
-.ml-sub{text-align:center;color:var(--muted);font-size:.8rem;margin-bottom:8px;}
-.ml-bar-bg{background:#21262d;border-radius:8px;height:10px;overflow:hidden;}
-.ml-bar{height:10px;border-radius:8px;background:linear-gradient(90deg,var(--accent),var(--green));transition:width .5s ease;}
-.pills{display:flex;flex-wrap:wrap;gap:6px;justify-content:center;margin-top:10px;}
-.pill{padding:3px 12px;border-radius:20px;font-size:.72rem;font-weight:700;background:#21262d;color:var(--muted);border:1px solid var(--border);transition:all .2s;}
-.pill.hot{background:var(--accent);color:#0d1117;transform:scale(1.06);}
-.algo-box{background:#0d1f2d;border-left:3px solid var(--accent);padding:7px 11px;border-radius:0 6px 6px 0;font-size:.73rem;color:var(--muted);margin-top:9px;line-height:1.6;}
-.wave-card{background:var(--card);border:1px solid var(--border);border-radius:9px;padding:13px;margin-bottom:12px;}
-.whead{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px;margin-bottom:8px;}
-.whead h3{color:var(--muted);font-size:.72rem;font-weight:700;text-transform:uppercase;letter-spacing:.5px;}
-.leg{display:flex;gap:12px;font-size:.7rem;color:var(--muted);}
-.ld{width:9px;height:9px;border-radius:50%;display:inline-block;margin-right:3px;vertical-align:middle;}
-canvas{width:100%!important;display:block;border-radius:5px;}
-.sig-box{background:var(--card);border:1px solid var(--border);border-radius:9px;padding:13px;margin-bottom:12px;}
-.sig-box h3{color:var(--muted);font-size:.72rem;font-weight:700;text-transform:uppercase;letter-spacing:.5px;margin-bottom:9px;}
-.srow{display:flex;align-items:center;gap:10px;margin:5px 0;}
-.sl{width:110px;font-size:.75rem;color:var(--muted);}
-.sb-bg{flex:1;background:#21262d;border-radius:5px;height:7px;}
-.sb{height:7px;border-radius:5px;transition:width .4s;}
-.sv{width:44px;text-align:right;font-size:.75rem;font-weight:700;}
-.sig-note{margin-top:8px;font-size:.73rem;color:var(--muted);}
-.htable{width:100%;border-collapse:collapse;font-size:.8rem;}
-.htable th{padding:8px 9px;text-align:left;color:var(--muted);font-size:.72rem;border-bottom:1px solid var(--border);font-weight:600;text-transform:uppercase;letter-spacing:.4px;}
-.htable td{padding:7px 9px;border-bottom:1px solid #21262d;vertical-align:middle;}
-.htable tr:hover td{background:#21262d40;}
-.obs{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.7rem;font-weight:700;}
-.o-gt{background:#1a3a2a;color:#3fb950;}.o-ht{background:#1a2a3a;color:#58a6ff;}
-.o-mt{background:#2a1a3a;color:#a371f7;}.o-mht{background:#2a2a1a;color:#d29922;}
-.o-w{background:#3a1a2a;color:#f778ba;}.o-al{background:#3a1a1a;color:#f85149;}
-.o-nr{background:#1a2a1a;color:#7ee787;}.o-uk{background:#21262d;color:var(--muted);}
-.pg{display:flex;gap:7px;align-items:center;justify-content:flex-end;margin-top:9px;font-size:.78rem;}
-.sform label{display:block;color:var(--muted);font-size:.75rem;margin-bottom:3px;margin-top:12px;}
-.sform input[type="number"]{background:#21262d;border:1px solid var(--border);color:var(--text);padding:7px 11px;border-radius:6px;font-size:.88rem;font-family:inherit;width:150px;}
-.sbtn{background:var(--accent);color:#0d1117;border:none;padding:8px 18px;border-radius:7px;cursor:pointer;font-weight:700;font-size:.82rem;font-family:inherit;margin-top:9px;}
-.sbtn:hover{opacity:.85;} .sbtn.red{background:var(--red);}
-.msg{font-size:.78rem;margin-top:6px;min-height:16px;}
-.msg.ok{color:var(--green);}.msg.err{color:var(--red);}
-.logbox{background:#0d1117;border-radius:5px;padding:9px;height:190px;overflow-y:auto;font-family:monospace;font-size:.73rem;line-height:1.7;}
-.logbox .le{color:var(--muted);}
-.logbox .le .ts{color:var(--green);} .logbox .le .lb{color:var(--accent);font-weight:700;}
-.toast{position:fixed;top:16px;left:50%;transform:translateX(-50%) translateY(-80px);background:var(--red);color:#fff;padding:11px 20px;border-radius:8px;font-weight:700;box-shadow:0 5px 18px rgba(0,0,0,.45);z-index:999;transition:transform .3s;}
+
+/* -- CARDS -- */
+.card{background:var(--wht);border:3px solid var(--blk);padding:16px;margin:-1px;}
+.g4 .card,.g2 .card{border:none;border-right:3px solid var(--blk);border-bottom:3px solid var(--blk);}
+.g4 .card:nth-child(4n),.g2 .card:nth-child(2n){border-right:none;}
+.card h3{font-family:'Space Mono',monospace;font-size:.65rem;font-weight:700;text-transform:uppercase;letter-spacing:2px;margin-bottom:8px;color:#555;}
+.bv{font-size:1.7rem;font-weight:800;font-family:'Space Grotesk',sans-serif;color:var(--blk);}
+
+/* -- STATUS BAR -- */
+.statusbar{padding:14px 18px;text-align:center;font-size:1rem;font-weight:800;margin-bottom:20px;border:3px solid var(--blk);font-family:'Space Mono',monospace;letter-spacing:3px;text-transform:uppercase;box-shadow:5px 5px 0 var(--blk);}
+.statusbar.normal{background:var(--grn);color:var(--blk);}
+.statusbar.danger{background:var(--red);color:var(--wht);animation:blink .8s infinite;}
+@keyframes blink{50%{opacity:.55;}}
+
+/* -- ML PANEL -- */
+.ml-panel{background:var(--blk);border:3px solid var(--blk);padding:20px;margin-bottom:20px;box-shadow:6px 6px 0 #555;}
+.ml-panel .mph{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px;margin-bottom:14px;border-bottom:2px solid #333;padding-bottom:10px;}
+.ml-panel .mph h2{color:var(--yel);font-size:.82rem;font-weight:800;letter-spacing:3px;text-transform:uppercase;font-family:'Space Mono',monospace;}
+.ml-panel .mph .algo{color:#888;font-size:.67rem;font-family:'Space Mono',monospace;}
+.ml-label{font-size:2.4rem;font-weight:800;color:var(--yel);text-align:center;padding:8px 0 4px;font-family:'Space Grotesk',sans-serif;letter-spacing:2px;}
+.ml-sub{text-align:center;color:#aaa;font-size:.75rem;margin-bottom:10px;font-family:'Space Mono',monospace;}
+.ml-bar-bg{background:#222;border:2px solid #555;height:12px;overflow:hidden;}
+.ml-bar{height:12px;background:var(--yel);transition:width .5s ease;}
+.pills{display:flex;flex-wrap:wrap;gap:6px;justify-content:center;margin-top:12px;}
+.pill{padding:4px 12px;font-size:.68rem;font-weight:700;background:#1a1a1a;color:#666;border:2px solid #444;font-family:'Space Mono',monospace;text-transform:uppercase;transition:all .15s;}
+.pill.hot{background:var(--yel);color:var(--blk);border-color:var(--yel);box-shadow:2px 2px 0 #888;}
+.algo-box{background:#111;border-left:4px solid var(--yel);padding:8px 12px;font-size:.7rem;color:#888;margin-top:12px;line-height:1.7;font-family:'Space Mono',monospace;}
+
+/* -- WAVEFORM -- */
+.wave-card{background:var(--wht);border:3px solid var(--blk);padding:16px;margin-bottom:20px;box-shadow:4px 4px 0 #aaa;}
+.whead{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px;margin-bottom:10px;padding-bottom:8px;border-bottom:2px solid var(--blk);}
+.whead h3{font-family:'Space Mono',monospace;font-size:.68rem;font-weight:700;text-transform:uppercase;letter-spacing:2px;}
+.leg{display:flex;gap:12px;font-size:.68rem;font-family:'Space Mono',monospace;}
+.ld{width:10px;height:10px;display:inline-block;margin-right:3px;vertical-align:middle;border:1px solid var(--blk);}
+canvas{width:100%!important;display:block;}
+
+/* -- SIGNAL ANALYSIS -- */
+.sig-box{background:var(--wht);border:3px solid var(--blk);padding:16px;margin-bottom:20px;}
+.sig-box h3{font-family:'Space Mono',monospace;font-size:.68rem;font-weight:700;text-transform:uppercase;letter-spacing:2px;margin-bottom:12px;padding-bottom:8px;border-bottom:2px solid var(--blk);}
+.srow{display:flex;align-items:center;gap:10px;margin:8px 0;}
+.sl{width:120px;font-size:.7rem;color:#555;font-family:'Space Mono',monospace;text-transform:uppercase;}
+.sb-bg{flex:1;background:#eee;border:2px solid var(--blk);height:10px;}
+.sb{height:100%;transition:width .4s;}
+.sv{width:50px;text-align:right;font-size:.72rem;font-weight:700;font-family:'Space Mono',monospace;}
+.sig-note{margin-top:10px;font-size:.7rem;color:#555;font-family:'Space Mono',monospace;padding:8px;background:#f5f5f5;border-left:3px solid var(--blk);}
+
+/* -- HISTORY TABLE -- */
+.htable{width:100%;border-collapse:collapse;font-size:.76rem;font-family:'Space Mono',monospace;}
+.htable th{padding:9px 10px;text-align:left;background:var(--blk);color:var(--yel);font-size:.65rem;font-weight:700;text-transform:uppercase;letter-spacing:1px;}
+.htable td{padding:7px 10px;border-bottom:2px solid #e0e0e0;vertical-align:middle;}
+.htable tr:hover td{background:#fffde0;}
+.obs{display:inline-block;padding:2px 8px;font-size:.65rem;font-weight:700;font-family:'Space Mono',monospace;border:2px solid var(--blk);}
+.o-gt{background:#00ff6a;color:#000;}.o-ht{background:#0057ff;color:#fff;}
+.o-mt{background:#a371f7;color:#fff;}.o-mht{background:#ffe600;color:#000;}
+.o-w{background:#ff69b4;color:#000;}.o-al{background:#ff2b2b;color:#fff;}
+.o-nr{background:#e0e0e0;color:#000;}.o-uk{background:#ccc;color:#000;}
+.pg{display:flex;gap:7px;align-items:center;justify-content:flex-end;margin-top:10px;font-size:.72rem;font-family:'Space Mono',monospace;}
+
+/* -- SETTINGS FORM -- */
+.sform label{display:block;font-family:'Space Mono',monospace;font-size:.68rem;font-weight:700;text-transform:uppercase;letter-spacing:1px;margin-bottom:4px;margin-top:14px;color:#555;}
+.sform input[type="number"]{background:var(--wht);border:3px solid var(--blk);color:var(--blk);padding:8px 12px;font-size:.88rem;font-family:'Space Mono',monospace;font-weight:700;width:160px;}
+.sform input[type="number"]:focus{outline:none;box-shadow:4px 4px 0 var(--blk);}
+.sbtn{background:var(--blk);color:var(--yel);border:3px solid var(--blk);padding:9px 20px;cursor:pointer;font-weight:700;font-size:.75rem;font-family:'Space Mono',monospace;text-transform:uppercase;letter-spacing:1px;box-shadow:4px 4px 0 #555;margin-top:10px;}
+.sbtn:hover{background:#222;}
+.sbtn:active{box-shadow:none;transform:translate(4px,4px);}
+.sbtn.red{background:var(--red);color:var(--wht);}
+.msg{font-size:.72rem;margin-top:7px;min-height:16px;font-family:'Space Mono',monospace;}
+.msg.ok{color:#006600;font-weight:700;}.msg.err{color:var(--red);font-weight:700;}
+
+/* -- LOG BOX -- */
+.logbox{background:var(--blk);border:3px solid var(--blk);padding:10px;height:190px;overflow-y:auto;font-family:'Space Mono',monospace;font-size:.7rem;line-height:1.8;}
+.logbox::-webkit-scrollbar{width:5px;}.logbox::-webkit-scrollbar-thumb{background:var(--yel);}
+.logbox .le{color:#888;}
+.logbox .le .ts{color:var(--grn);}.logbox .le .lb{color:var(--yel);font-weight:700;}
+
+/* -- TOAST -- */
+.toast{position:fixed;top:16px;left:50%;transform:translateX(-50%) translateY(-80px);background:var(--blk);color:var(--yel);padding:12px 22px;font-weight:700;box-shadow:5px 5px 0 #555;z-index:999;transition:transform .25s;font-family:'Space Mono',monospace;text-transform:uppercase;font-size:.8rem;border:3px solid var(--blk);}
 .toast.show{transform:translateX(-50%) translateY(0);}
-.kv{display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid #21262d;font-size:.82rem;}
-.kv:last-child{border-bottom:none;}.kv .k{color:var(--muted);}
+
+/* -- KV ROWS -- */
+.kv{display:flex;justify-content:space-between;align-items:center;padding:9px 0;border-bottom:2px solid #e0e0e0;font-size:.78rem;font-family:'Space Mono',monospace;}
+.kv:last-child{border-bottom:none;}.kv .k{color:#555;text-transform:uppercase;font-size:.68rem;letter-spacing:1px;}
 .row-full{grid-column:1/-1;}
+
+/* -- STANDALONE CARD (outside grids) -- */
+.s-card{background:var(--wht);border:3px solid var(--blk);padding:18px;margin-bottom:20px;}
+.s-card h3{font-family:'Space Mono',monospace;font-size:.72rem;font-weight:800;letter-spacing:2px;text-transform:uppercase;color:var(--blk);margin-bottom:10px;padding-bottom:8px;border-bottom:2px solid var(--blk);}
 </style>
 </head>
 <body>
 <div id="toast" class="toast"></div>
-<div id="connWarn" class="conn-warn">Connection to ESP32 lost - retrying...</div>
+<div class="ticker"><span class="ticker-inner">&nbsp;&nbsp;&nbsp;SYSTEM ONLINE &nbsp;&#9670;&nbsp; ESP32 ACTIVE &nbsp;&#9670;&nbsp; MPU-6050 READY &nbsp;&#9670;&nbsp; ML BATCH MODE &nbsp;&#9670;&nbsp; RANDOM FOREST CLASSIFIER &nbsp;&#9670;&nbsp; GENTLE_TAP &nbsp;&middot;&nbsp; HAND_TAP &nbsp;&middot;&nbsp; MULTI_TAP &nbsp;&middot;&nbsp; MULTIHAND_TAP &nbsp;&middot;&nbsp; WALK1 &nbsp;&#9670;&nbsp; SYSTEM ONLINE &nbsp;&#9670;&nbsp; ESP32 ACTIVE &nbsp;&#9670;&nbsp; ML BATCH MODE &nbsp;&#9670;&nbsp;</span></div>
+<div id="connWarn" class="conn-warn">&#9888; CONNECTION TO ESP32 LOST &mdash; RETRYING...</div>
 <header>
   <div>
-    <h1>GROUND VIBRATION MONITOR</h1>
-    <div class="sub">ESP32 + MPU-6050 &middot; Random Forest ML &middot; 10s Batch Classification</div>
+    <h1>/// GROUND VIBRATION MONITOR</h1>
+    <div class="sub">ESP32 + MPU-6050 &nbsp;&middot;&nbsp; RANDOM FOREST ML &nbsp;&middot;&nbsp; 10S BATCH CLASSIFICATION</div>
   </div>
   <div class="hright">
-    <span id="hAlerts" class="badge br">Alerts: 0</span>
+    <span id="hAlerts" class="badge br">ALERTS: 0</span>
     <span id="hSD"     class="badge bb">SD: --</span>
     <span id="hML"     class="badge bg">ML: --</span>
     <span id="hClock"  class="badge bb">--:--:--</span>
-    <button class="hbtn" onclick="toggleTheme()">Theme</button>
+    <button class="hbtn" onclick="toggleTheme()">THEME</button>
   </div>
 </header>
 <div class="container">
 <div class="tabs">
-  <div class="tab active" id="tb-dash"     onclick="showTab('dash')">Dashboard</div>
-  <div class="tab"        id="tb-history"  onclick="showTab('history')">History</div>
-  <div class="tab"        id="tb-settings" onclick="showTab('settings')">Settings</div>
+  <div class="tab active" id="tb-dash"     onclick="showTab('dash')">// DASHBOARD</div>
+  <div class="tab"        id="tb-history"  onclick="showTab('history')">// HISTORY</div>
+  <div class="tab"        id="tb-settings" onclick="showTab('settings')">// SETTINGS</div>
 </div>
 
 <!-- DASHBOARD -->
@@ -703,53 +762,53 @@ canvas{width:100%!important;display:block;border-radius:5px;}
     <div class="card"><h3>Accel Y</h3><div class="bv" id="vAY">--</div></div>
     <div class="card"><h3>Accel Z</h3><div class="bv" id="vAZ">--</div></div>
     <div class="card"><h3>Vibration Score</h3><div class="bv" id="vVIB">--</div></div>
-    <div class="card"><h3>Session Min</h3><div class="bv" id="vMIN" style="color:var(--green)">--</div></div>
+    <div class="card"><h3>Session Min</h3><div class="bv" id="vMIN" style="color:#006600">--</div></div>
     <div class="card"><h3>Session Max</h3><div class="bv" id="vMAX" style="color:var(--red)">--</div></div>
-    <div class="card"><h3>Session Avg</h3><div class="bv" id="vAVG" style="color:var(--orange)">--</div></div>
+    <div class="card"><h3>Session Avg</h3><div class="bv" id="vAVG" style="color:#996600">--</div></div>
     <div class="card"><h3>Wi-Fi RSSI</h3><div class="bv" id="vRSSI" style="font-size:1.1rem">--</div></div>
   </div>
   <div class="ml-panel">
-    <div class="mph"><h2>ML VIBRATION CLASSIFICATION</h2><span class="algo">Random Forest &middot; 40 features &middot; 50-sample windows &middot; 10s batch</span></div>
-    <div class="ml-label" id="mlLabel">Waiting...</div>
-    <div class="ml-sub"   id="mlConf">Recording 10s batch...</div>
+    <div class="mph"><h2>// ML VIBRATION CLASSIFICATION</h2><span class="algo">Random Forest &middot; 40 features &middot; 50-sample windows &middot; 10s batch</span></div>
+    <div class="ml-label" id="mlLabel">WAITING...</div>
+    <div class="ml-sub"   id="mlConf">RECORDING 10S BATCH...</div>
     <div class="ml-bar-bg"><div class="ml-bar" id="mlBar" style="width:0%"></div></div>
     <div class="pills" id="mlPills"></div>
     <div class="algo-box">
-      <b style="color:var(--accent)">How it works:</b> ESP32 records 330 samples (~10s at 33Hz).
+      <b style="color:var(--yel)">HOW IT WORKS:</b> ESP32 records 330 samples (~10s at 33Hz).
       Each 50-sample window extracts 40 features (mean, std, peaks, zero-crossings, energy).
-      A Random Forest votes across all windows and the majority label is the final classification.<br>
-      <b style="color:var(--orange)">Classes:</b> Gentle_Tap &bull; Hand_Tap &bull; Multi_Tap &bull; MultiHand_Tap &bull; Walk1
+      A Random Forest votes across all windows &mdash; majority label is the final classification.<br>
+      <b style="color:#f97316">CLASSES:</b> Gentle_Tap &bull; Hand_Tap &bull; Multi_Tap &bull; MultiHand_Tap &bull; Walk1
     </div>
   </div>
   <div class="wave-card">
     <div class="whead">
-      <h3>Live Signal Waveform</h3>
+      <h3>// Live Signal Waveform</h3>
       <div style="display:flex;gap:9px;align-items:center;">
         <div class="leg">
-          <span><span class="ld" style="background:#58a6ff"></span>AX</span>
-          <span><span class="ld" style="background:#3fb950"></span>AY</span>
-          <span><span class="ld" style="background:#f85149"></span>AZ</span>
-          <span><span class="ld" style="background:#d29922"></span>Vibration</span>
+          <span><span class="ld" style="background:#0057ff"></span>AX</span>
+          <span><span class="ld" style="background:#00ff6a"></span>AY</span>
+          <span><span class="ld" style="background:#ff2b2b"></span>AZ</span>
+          <span><span class="ld" style="background:#ffe600"></span>VIB</span>
         </div>
-        <button class="hbtn" onclick="togglePause()"><span id="pauseLbl">Pause</span></button>
+        <button class="hbtn" onclick="togglePause()"><span id="pauseLbl">PAUSE</span></button>
       </div>
     </div>
     <canvas id="waveCanvas" height="180"></canvas>
   </div>
   <div class="sig-box">
-    <h3>Signal Character Analysis</h3>
-    <div class="srow"><span class="sl">Energy</span><div class="sb-bg"><div class="sb" id="sbE" style="background:#58a6ff;width:0%"></div></div><span class="sv" id="svE">--</span></div>
-    <div class="srow"><span class="sl">Impulsiveness</span><div class="sb-bg"><div class="sb" id="sbI" style="background:#f85149;width:0%"></div></div><span class="sv" id="svI">--</span></div>
-    <div class="srow"><span class="sl">Smoothness</span><div class="sb-bg"><div class="sb" id="sbS" style="background:#3fb950;width:0%"></div></div><span class="sv" id="svS">--</span></div>
-    <div class="srow"><span class="sl">Linearity</span><div class="sb-bg"><div class="sb" id="sbL" style="background:#d29922;width:0%"></div></div><span class="sv" id="svL">--</span></div>
+    <h3>// Signal Character Analysis</h3>
+    <div class="srow"><span class="sl">Energy</span><div class="sb-bg"><div class="sb" id="sbE" style="background:#0057ff;width:0%"></div></div><span class="sv" id="svE">--</span></div>
+    <div class="srow"><span class="sl">Impulsiveness</span><div class="sb-bg"><div class="sb" id="sbI" style="background:#ff2b2b;width:0%"></div></div><span class="sv" id="svI">--</span></div>
+    <div class="srow"><span class="sl">Smoothness</span><div class="sb-bg"><div class="sb" id="sbS" style="background:#00ff6a;width:0%"></div></div><span class="sv" id="svS">--</span></div>
+    <div class="srow"><span class="sl">Linearity</span><div class="sb-bg"><div class="sb" id="sbL" style="background:#ffe600;width:0%"></div></div><span class="sv" id="svL">--</span></div>
     <div class="sig-note" id="sigNote">Collecting data...</div>
   </div>
   <div class="g2">
-    <div class="card"><h3>Vibration Gauge</h3><canvas id="gaugeCanvas" height="120"></canvas></div>
-    <div class="card"><h3>Tilt Direction</h3><canvas id="tiltCanvas" height="120"></canvas></div>
+    <div class="card"><h3>// Vibration Gauge</h3><canvas id="gaugeCanvas" height="120"></canvas></div>
+    <div class="card"><h3>// Tilt Direction</h3><canvas id="tiltCanvas" height="120"></canvas></div>
   </div>
-  <div class="card">
-    <h3 style="margin-bottom:10px;">System Information</h3>
+  <div class="s-card">
+    <h3>// System Information</h3>
     <div class="kv"><span class="k">ESP32 IP</span><span>%IP%</span></div>
     <div class="kv"><span class="k">Uptime</span><span id="siUp">--</span></div>
     <div class="kv"><span class="k">Threshold</span><span id="siThr">--</span></div>
@@ -763,76 +822,74 @@ canvas{width:100%!important;display:block;border-radius:5px;}
 
 <!-- HISTORY -->
 <div class="pane" id="pane-history">
-  <div class="card" style="margin-bottom:12px;">
-    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:10px;">
-      <h3 style="font-size:.87rem;font-weight:700;color:var(--accent);">Vibration Event Log (SD Card)</h3>
-      <div style="display:flex;gap:7px;flex-wrap:wrap;">
-        <button class="hbtn" onclick="loadHistory()">Refresh</button>
-        <a href="/download" style="text-decoration:none"><button class="hbtn">Download CSV</button></a>
-        <button class="hbtn" onclick="exportJSON()">Export JSON</button>
-        <button class="hbtn" style="color:var(--red)" onclick="clearLog()">Clear Log</button>
+  <div class="s-card">
+    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:14px;">
+      <h3 style="border-bottom:none;margin-bottom:0;padding-bottom:0;">// Vibration Event Log (SD Card)</h3>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;">
+        <button class="hbtn" onclick="loadHistory()">REFRESH</button>
+        <a href="/download" style="text-decoration:none"><button class="hbtn">DOWNLOAD CSV</button></a>
+        <button class="hbtn" onclick="exportJSON()">EXPORT JSON</button>
+        <button class="hbtn" style="background:var(--red);color:var(--wht);" onclick="clearLog()">CLEAR LOG</button>
       </div>
     </div>
-    <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:9px;font-size:.76rem;color:var(--muted);">
-      Filter observation:
-      <select id="fClass" onchange="applyFilter()" style="background:#21262d;border:1px solid var(--border);color:var(--text);padding:3px 7px;border-radius:6px;font-size:.76rem;">
+    <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:12px;font-size:.7rem;font-family:'Space Mono',monospace;text-transform:uppercase;letter-spacing:1px;color:#555;">
+      Filter:
+      <select id="fClass" onchange="applyFilter()" style="background:var(--wht);border:2px solid var(--blk);color:var(--blk);padding:4px 8px;font-size:.7rem;font-family:'Space Mono',monospace;">
         <option value="">All</option>
         <option>Gentle_Tap</option><option>Hand_Tap</option><option>Multi_Tap</option>
         <option>MultiHand_Tap</option><option>Walk1</option><option>ALERT</option><option>NORMAL</option>
       </select>
       Min vib:
-      <input type="number" id="fMinVib" value="0" onchange="applyFilter()" style="background:#21262d;border:1px solid var(--border);color:var(--text);padding:3px 7px;border-radius:6px;font-size:.76rem;width:70px;">
+      <input type="number" id="fMinVib" value="0" onchange="applyFilter()" style="background:var(--wht);border:2px solid var(--blk);color:var(--blk);padding:4px 7px;font-size:.7rem;width:70px;font-family:'Space Mono',monospace;">
     </div>
     <table class="htable">
       <thead><tr><th>Time</th><th>AX</th><th>AY</th><th>AZ</th><th>Vibration</th><th>Status</th><th>Observation</th></tr></thead>
-      <tbody id="histTbody"><tr><td colspan="7" style="text-align:center;padding:18px;color:var(--muted)">Click Refresh to load SD card data</td></tr></tbody>
+      <tbody id="histTbody"><tr><td colspan="7" style="text-align:center;padding:18px;color:#888;font-family:'Space Mono',monospace;">// Click REFRESH to load SD card data</td></tr></tbody>
     </table>
-    <div class="pg"><span id="histPg">Page 1/1</span><button class="hbtn" onclick="hPrev()">Prev</button><button class="hbtn" onclick="hNext()">Next</button></div>
+    <div class="pg"><span id="histPg">Page 1/1</span><button class="hbtn" onclick="hPrev()">PREV</button><button class="hbtn" onclick="hNext()">NEXT</button></div>
   </div>
   <div class="wave-card">
-    <div class="whead"><h3>Vibration History Chart (last 100 events)</h3></div>
+    <div class="whead"><h3>// Vibration History Chart (last 100 events)</h3></div>
     <canvas id="histChart" height="150"></canvas>
   </div>
   <!-- LAST 10 BATCHES SUMMARY -->
-  <div class="card" style="margin-top:12px;">
-    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:12px;">
-      <h3 style="font-size:.87rem;font-weight:700;color:var(--accent);">Last 10 Batch Summary</h3>
-      <button class="hbtn" onclick="loadRecentBatches()">Refresh</button>
+  <div class="s-card">
+    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:14px;">
+      <h3 style="border-bottom:none;margin-bottom:0;padding-bottom:0;">// Last 10 Batch Summary</h3>
+      <button class="hbtn" onclick="loadRecentBatches()">REFRESH</button>
     </div>
-    <!-- batch timeline strip -->
     <div id="batchStrip" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px;"></div>
-    <!-- breakdown bars -->
-    <div id="batchBreakdown" style="font-size:.8rem;color:var(--muted);">Click Refresh to load.</div>
+    <div id="batchBreakdown" style="font-size:.75rem;color:#555;font-family:'Space Mono',monospace;">// Click REFRESH to load.</div>
   </div>
 </div>
 
 <!-- SETTINGS -->
 <div class="pane" id="pane-settings">
   <div class="g2">
-    <div class="card sform">
-      <h3 style="font-size:.87rem;font-weight:700;color:var(--accent);margin-bottom:4px;">Detection Threshold</h3>
-      <p style="font-size:.73rem;color:var(--muted);">Vibration score that triggers ALERT. Resets on reboot.</p>
+    <div class="card sform" style="border:3px solid var(--blk);margin:0;">
+      <h3 style="font-family:'Space Mono',monospace;font-size:.72rem;font-weight:800;letter-spacing:2px;text-transform:uppercase;margin-bottom:6px;">// Detection Threshold</h3>
+      <p style="font-size:.7rem;color:#555;font-family:'Space Mono',monospace;">Vibration score that triggers ALERT. Resets on reboot.</p>
       <label>New value (200-20000)</label>
       <input type="number" id="threshInput" value="%THRESHOLD%" min="200" max="20000">
-      <br><button class="sbtn" onclick="setThreshold()">Update</button>
+      <br><button class="sbtn" onclick="setThreshold()">UPDATE</button>
       <div class="msg" id="threshMsg"></div>
     </div>
-    <div class="card sform">
-      <h3 style="font-size:.87rem;font-weight:700;color:var(--accent);margin-bottom:4px;">Demo / Test Mode</h3>
-      <p style="font-size:.73rem;color:var(--muted);">Triggers a fake ALERT for 5 seconds.</p>
-      <button class="sbtn" onclick="runDemo()">Run Demo Alert</button>
-      <h3 style="font-size:.87rem;font-weight:700;color:var(--accent);margin-top:16px;margin-bottom:4px;">SD Card Log</h3>
-      <p style="font-size:.73rem;color:var(--muted);">Permanently deletes the log file from SD card.</p>
-      <button class="sbtn red" onclick="clearLog()">Clear Log File</button>
+    <div class="card sform" style="border:3px solid var(--blk);border-left:none;margin:0;">
+      <h3 style="font-family:'Space Mono',monospace;font-size:.72rem;font-weight:800;letter-spacing:2px;text-transform:uppercase;margin-bottom:6px;">// Demo / Test Mode</h3>
+      <p style="font-size:.7rem;color:#555;font-family:'Space Mono',monospace;">Triggers a fake ALERT for 5 seconds.</p>
+      <button class="sbtn" onclick="runDemo()" style="margin-top:14px;">RUN DEMO ALERT</button>
+      <h3 style="font-family:'Space Mono',monospace;font-size:.72rem;font-weight:800;letter-spacing:2px;text-transform:uppercase;margin-top:20px;margin-bottom:6px;">// SD Card Log</h3>
+      <p style="font-size:.7rem;color:#555;font-family:'Space Mono',monospace;">Permanently deletes the log file from SD card.</p>
+      <button class="sbtn red" onclick="clearLog()" style="margin-top:10px;">CLEAR LOG FILE</button>
       <div class="msg" id="sdMsg"></div>
     </div>
   </div>
-  <div class="card" style="margin-top:12px;">
-    <h3 style="font-size:.87rem;font-weight:700;color:var(--accent);margin-bottom:9px;">Threshold Change History</h3>
-    <div id="threshHistory" style="font-size:.8rem;color:var(--muted);">Load settings to see history.</div>
+  <div class="s-card" style="margin-top:20px;">
+    <h3>// Threshold Change History</h3>
+    <div id="threshHistory" style="font-size:.75rem;color:#555;font-family:'Space Mono',monospace;">// Load settings to see history.</div>
   </div>
-  <div class="card" style="margin-top:12px;">
-    <h3 style="font-size:.87rem;font-weight:700;color:var(--accent);margin-bottom:9px;">ML Inference Log</h3>
+  <div class="s-card">
+    <h3>// ML Inference Log</h3>
     <div class="logbox" id="mlLog"></div>
   </div>
 </div>
@@ -866,8 +923,8 @@ function showTab(t){
 function toast(msg,ok){
   const el=document.getElementById('toast');
   el.textContent=msg;
-  el.style.background=ok?'#1a3a2a':'#3a1a1a';
-  el.style.color=ok?'#3fb950':'#f85149';
+  el.style.background=ok?'#000':'#ff2b2b';
+  el.style.color=ok?'#ffe600':'#fff';
   el.classList.add('show');
   setTimeout(()=>el.classList.remove('show'),3500);
 }
@@ -985,9 +1042,9 @@ function drawWave(){
   cv.width=W*dpr;cv.height=H*dpr;
   const ctx=cv.getContext('2d');ctx.scale(dpr,dpr);
   ctx.clearRect(0,0,W,H);
-  ctx.strokeStyle='#21262d';ctx.lineWidth=1;
+  ctx.strokeStyle='#ddd';ctx.lineWidth=1;
   for(let i=0;i<=4;i++){const y=(i/4)*H;ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(W,y);ctx.stroke();}
-  ctx.strokeStyle='#30363d';ctx.lineWidth=1;
+  ctx.strokeStyle='#bbb';ctx.lineWidth=1;
   ctx.beginPath();ctx.moveTo(0,H/2);ctx.lineTo(W,H/2);ctx.stroke();
   const n=axH.length;if(n<2)return;
   const peak=Math.max(...[...axH,...ayH,...azH].map(Math.abs),500);
@@ -996,14 +1053,14 @@ function drawWave(){
     data.forEach((v,i)=>{const x=(i/(MAX_PTS-1))*W,y=H/2-(v/peak)*(H/2-8);i===0?ctx.moveTo(x,y):ctx.lineTo(x,y);});
     ctx.stroke();
   }
-  line(axH,'#58a6ff',1.4);line(ayH,'#3fb950',1.4);line(azH,'#f85149',1.4);
+  line(axH,'#0057ff',1.4);line(ayH,'#00cc55',1.4);line(azH,'#ff2b2b',1.4);
   if(vibH.length>1){
     const vmax=Math.max(...vibH,1);
     ctx.strokeStyle='#d29922';ctx.lineWidth=2;ctx.beginPath();
     vibH.forEach((v,i)=>{const x=(i/(MAX_PTS-1))*W,y=H-(v/vmax)*(H*0.3);i===0?ctx.moveTo(x,y):ctx.lineTo(x,y);});
     ctx.stroke();
     ctx.lineTo((vibH.length-1)/(MAX_PTS-1)*W,H);ctx.lineTo(0,H);ctx.closePath();
-    ctx.fillStyle='rgba(210,153,34,0.07)';ctx.fill();
+    ctx.fillStyle='rgba(210,153,34,0.15)';ctx.fill();
   }
 }
 
@@ -1016,13 +1073,13 @@ function drawGauge(vib,thr){
   const cx=W/2,cy=H-6,r=Math.min(W/2-10,H-14);
   const ratio=Math.min(vib/Math.max(thr*1.5,1),1);
   ctx.lineWidth=13;ctx.lineCap='round';
-  ctx.strokeStyle='#21262d';ctx.beginPath();ctx.arc(cx,cy,r,Math.PI,2*Math.PI);ctx.stroke();
+  ctx.strokeStyle='#ddd';ctx.beginPath();ctx.arc(cx,cy,r,Math.PI,2*Math.PI);ctx.stroke();
   const g=ctx.createLinearGradient(0,0,W,0);
   g.addColorStop(0,'#3fb950');g.addColorStop(.6,'#d29922');g.addColorStop(1,'#f85149');
   ctx.strokeStyle=g;ctx.beginPath();ctx.arc(cx,cy,r,Math.PI,Math.PI+ratio*Math.PI);ctx.stroke();
   const a=Math.PI+ratio*Math.PI,nx=cx+Math.cos(a)*(r-16),ny=cy+Math.sin(a)*(r-16);
-  ctx.strokeStyle='#c9d1d9';ctx.lineWidth=2;ctx.beginPath();ctx.moveTo(cx,cy);ctx.lineTo(nx,ny);ctx.stroke();
-  ctx.fillStyle='#c9d1d9';ctx.font='bold 14px Segoe UI,sans-serif';ctx.textAlign='center';ctx.fillText(vib,cx,cy-r/2+4);
+  ctx.strokeStyle='#333';ctx.lineWidth=2;ctx.beginPath();ctx.moveTo(cx,cy);ctx.lineTo(nx,ny);ctx.stroke();
+  ctx.fillStyle='#333';ctx.font='bold 14px Space Mono,monospace';ctx.textAlign='center';ctx.fillText(vib,cx,cy-r/2+4);
 }
 
 function drawTilt(axv,ayv){
@@ -1032,12 +1089,12 @@ function drawTilt(axv,ayv){
   const ctx=cv.getContext('2d');ctx.scale(dpr,dpr);
   ctx.clearRect(0,0,W,H);
   const cx=W/2,cy=H/2,r=Math.min(W,H)/2-8;
-  [r,r*0.66,r*0.33].forEach(rr=>{ctx.strokeStyle='#21262d';ctx.lineWidth=1;ctx.beginPath();ctx.arc(cx,cy,rr,0,2*Math.PI);ctx.stroke();});
+  [r,r*0.66,r*0.33].forEach(rr=>{ctx.strokeStyle='#ddd';ctx.lineWidth=1;ctx.beginPath();ctx.arc(cx,cy,rr,0,2*Math.PI);ctx.stroke();});
   const angle=Math.atan2(ayv,axv),mag=Math.min(Math.sqrt(axv*axv+ayv*ayv)/8000,1);
   const nx=cx+Math.cos(angle)*r*mag,ny=cy+Math.sin(angle)*r*mag;
-  ctx.strokeStyle='#58a6ff';ctx.lineWidth=2.5;ctx.beginPath();ctx.moveTo(cx,cy);ctx.lineTo(nx,ny);ctx.stroke();
-  ctx.fillStyle='#58a6ff';ctx.beginPath();ctx.arc(nx,ny,5,0,2*Math.PI);ctx.fill();
-  ctx.fillStyle='#c9d1d9';ctx.beginPath();ctx.arc(cx,cy,3,0,2*Math.PI);ctx.fill();
+  ctx.strokeStyle='#0057ff';ctx.lineWidth=2.5;ctx.beginPath();ctx.moveTo(cx,cy);ctx.lineTo(nx,ny);ctx.stroke();
+  ctx.fillStyle='#0057ff';ctx.beginPath();ctx.arc(nx,ny,5,0,2*Math.PI);ctx.fill();
+  ctx.fillStyle='#000';ctx.beginPath();ctx.arc(cx,cy,3,0,2*Math.PI);ctx.fill();
 }
 
 function obsLabel(r){if(r.mlLabel&&r.mlLabel.length>2&&r.mlLabel!=='--'&&r.mlLabel!=='Recording...'&&r.mlLabel!=='Analyzing...')return r.mlLabel;return r.status==='ALERT'?'ALERT':'NORMAL';}
@@ -1078,13 +1135,13 @@ function drawHistChart(){
   ctx.clearRect(0,0,W,H);
   const data=allHist.slice(-100);if(data.length<2)return;
   const maxV=Math.max(...data.map(r=>r.vibration),1),bw=W/data.length;
-  data.forEach((r,i)=>{const h=(r.vibration/maxV)*(H-8);ctx.fillStyle=r.status==='ALERT'?'#f85149':'#3fb950';ctx.fillRect(i*bw+1,H-h,bw-2,h);});
+  data.forEach((r,i)=>{const h=(r.vibration/maxV)*(H-8);ctx.fillStyle=r.status==='ALERT'?'#ff2b2b':'#00cc55';ctx.fillRect(i*bw+1,H-h,bw-2,h);});
 }
 
 // -- LAST 10 BATCHES SUMMARY -----------------------------------
 const BATCH_COLORS={
-  'Gentle_Tap':'#3fb950','Hand_Tap':'#58a6ff','Multi_Tap':'#a371f7',
-  'MultiHand_Tap':'#d29922','Walk1':'#f778ba','ALERT':'#f85149','NORMAL':'#7ee787','Unknown':'#8b949e'
+  'Gentle_Tap':'#006600','Hand_Tap':'#0057ff','Multi_Tap':'#6600cc',
+  'MultiHand_Tap':'#996600','Walk1':'#cc0066','ALERT':'#ff2b2b','NORMAL':'#006600','Unknown':'#555'
 };
 
 function loadRecentBatches(){
@@ -1101,10 +1158,10 @@ function loadRecentBatches(){
 
     // -- Timeline strip: one pill per batch --------------------
     strip.innerHTML=batches.map((b,i)=>{
-      const col=BATCH_COLORS[b.label]||"#8b949e";
-      return `<div style="background:#21262d;border:2px solid ${col};border-radius:8px;padding:5px 10px;font-size:.72rem;font-weight:700;color:${col};text-align:center;min-width:70px;">
-        <div style="font-size:.62rem;color:#8b949e;margin-bottom:2px;">Batch ${i+1}</div>
-        ${b.label}<br><span style="color:#8b949e;font-weight:400;">${Math.round(b.conf*100)}%</span>
+      const col=BATCH_COLORS[b.label]||"#555";
+      return `<div style="background:#fff;border:3px solid ${col};padding:5px 10px;font-size:.7rem;font-weight:700;color:${col};text-align:center;min-width:70px;font-family:'Space Mono',monospace;text-transform:uppercase;box-shadow:2px 2px 0 ${col};">
+        <div style="font-size:.58rem;color:#aaa;margin-bottom:2px;">BATCH ${i+1}</div>
+        ${b.label}<br><span style="color:#888;font-weight:400;">${Math.round(b.conf*100)}%</span>
       </div>`;
     }).join("");
 
@@ -1116,17 +1173,17 @@ function loadRecentBatches(){
 
     // -- Breakdown bars ----------------------------------------
     breakdown.innerHTML=`
-      <div style="margin-bottom:8px;font-size:.75rem;color:#8b949e;">${total} batch${total>1?"es":""} recorded &mdash; ${new Set(batches.map(b=>b.label)).size} unique vibration type${new Set(batches.map(b=>b.label)).size>1?"s":""}</div>
+      <div style="margin-bottom:8px;font-size:.72rem;color:#888;">${total} batch${total>1?"es":""} recorded &mdash; ${new Set(batches.map(b=>b.label)).size} unique vibration type${new Set(batches.map(b=>b.label)).size>1?"s":""}</div>
     `+sorted.map(([lbl,cnt])=>{
-      const col=BATCH_COLORS[lbl]||"#8b949e";
+      const col=BATCH_COLORS[lbl]||"#555";
       const pct=Math.round(cnt/total*100);
-      return `<div style="display:flex;align-items:center;gap:10px;margin:5px 0;">
-        <div style="width:110px;font-size:.75rem;color:${col};font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${lbl}</div>
-        <div style="flex:1;background:#21262d;border-radius:5px;height:10px;overflow:hidden;">
-          <div style="height:10px;border-radius:5px;background:${col};width:${pct}%;transition:width .4s;"></div>
+      return `<div style="display:flex;align-items:center;gap:10px;margin:6px 0;">
+        <div style="width:120px;font-size:.7rem;color:${col};font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:'Space Mono',monospace;text-transform:uppercase;">${lbl}</div>
+        <div style="flex:1;background:#eee;border:2px solid #000;height:12px;overflow:hidden;">
+          <div style="height:12px;background:${col};width:${pct}%;transition:width .4s;"></div>
         </div>
-        <div style="width:26px;text-align:right;font-size:.75rem;font-weight:700;">${cnt}</div>
-        <div style="width:32px;text-align:right;font-size:.72rem;color:#8b949e;">${pct}%</div>
+        <div style="width:26px;text-align:right;font-size:.72rem;font-weight:700;font-family:'Space Mono',monospace;">${cnt}</div>
+        <div style="width:34px;text-align:right;font-size:.7rem;color:#888;font-family:'Space Mono',monospace;">${pct}%</div>
       </div>`;
     }).join("");
   }).catch(()=>{
@@ -1544,6 +1601,11 @@ void setup() {
 
   if (WiFi.status() == WL_CONNECTED) {
     Serial.println("WiFi Connected!");
+    // Start mDNS -- ESP32 will resolve "gvms.local" without needing a fixed IP
+    if (MDNS.begin("esp32-gvms")) {
+      Serial.println("mDNS started: esp32-gvms.local");
+    }
+    MDNS.addService("http", "tcp", 80);
     Serial.print("IP Address: ");
     Serial.println(WiFi.localIP());
     Serial.print("ML Server:  http://");
@@ -1560,7 +1622,7 @@ void setup() {
   xTaskCreatePinnedToCore(
     mlHttpTask,    // function
     "mlHttpTask",  // name
-    16384,         // stack size (bytes) — needs room for JSON + HTTPClient
+    16384,         // stack size (bytes) � needs room for JSON + HTTPClient
     NULL,          // parameter
     1,             // priority
     &mlTaskHandle, // handle
