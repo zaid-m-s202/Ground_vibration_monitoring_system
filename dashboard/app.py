@@ -1,4 +1,4 @@
-﻿"""
+"""
 dashboard/app.py
 ================
 Ground Vibration Monitoring System (GVMS)
@@ -39,6 +39,8 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from ml.inference import GVMSInference
+from ml.features import features_from_buffer, WINDOW_SIZE as _WINDOW_SIZE
+import numpy as _np
 
 # â”€â”€ App setup â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 app = Flask(__name__)
@@ -686,45 +688,136 @@ def api_infer():
     return jsonify(result)
 
 
+
 @app.route("/api/infer/batch", methods=["POST"])
 def api_infer_batch():
     """
     POST JSON (two accepted formats):
       1. Named-key:  {"samples": [{"ax":..,"ay":..,"az":..,"vibration_score":..}, ...]}
       2. Compact:    {"samples": [[ax, ay, az, vs], ...]}   <-- ESP32 sends this
+
+    Vectorized batch mode: converts samples to numpy arrays, slices non-overlapping
+    windows, builds a feature matrix in one pass, and calls model.predict once.
+    Target: <500ms for 330 samples / 6 windows (vs previous 43-second per-sample loop).
     """
+    if not _inference.is_ready:
+        return jsonify({"error": "Model not loaded"}), 503
+
+    t0 = time.time()
+
     data = request.get_json(force=True)
     samples = data.get("samples", [])
 
     if not isinstance(samples, list) or len(samples) == 0:
         return jsonify({"error": "samples must be a non-empty list"}), 400
 
-    results = []
+    # --- Parse samples into numpy arrays in one shot ---
+    n = len(samples)
+    ax_all = _np.empty(n, dtype=_np.float64)
+    ay_all = _np.empty(n, dtype=_np.float64)
+    az_all = _np.empty(n, dtype=_np.float64)
+    vs_all = _np.empty(n, dtype=_np.float64)
+
+    valid = 0
     for s in samples:
         try:
-            # Accept both compact [ax,ay,az,vs] arrays and named-key dicts
             if isinstance(s, (list, tuple)):
-                ax_val = float(s[0])
-                ay_val = float(s[1])
-                az_val = float(s[2])
-                vs_val = float(s[3]) if len(s) > 3 else 0.0
+                ax_all[valid] = float(s[0])
+                ay_all[valid] = float(s[1])
+                az_all[valid] = float(s[2])
+                vs_all[valid] = float(s[3]) if len(s) > 3 else 0.0
             else:
-                ax_val = float(s["ax"])
-                ay_val = float(s["ay"])
-                az_val = float(s["az"])
-                vs_val = float(s.get("vibration_score", 0.0))
-        except (KeyError, IndexError, ValueError, TypeError) as e:
-            results.append({"error": str(e), "ready": False})
-            continue
+                ax_all[valid] = float(s["ax"])
+                ay_all[valid] = float(s["ay"])
+                az_all[valid] = float(s["az"])
+                vs_all[valid] = float(s.get("vibration_score", 0.0))
+            valid += 1
+        except (KeyError, IndexError, ValueError, TypeError):
+            pass  # skip bad samples
 
-        r = _inference.infer(ax_val, ay_val, az_val, vs_val)
-        r["timestamp"] = datetime.now(timezone.utc).isoformat()
+    if valid == 0:
+        return jsonify({"error": "no valid samples parsed"}), 400
+
+    ax_all = ax_all[:valid]
+    ay_all = ay_all[:valid]
+    az_all = az_all[:valid]
+    vs_all = vs_all[:valid]
+
+    # --- Slice non-overlapping windows and compute features ---
+    win_size   = getattr(_inference, "_window_size", _WINDOW_SIZE)
+    include_vs = getattr(_inference, "_include_vs", False)
+    n_windows  = valid // win_size  # only complete windows
+
+    if n_windows == 0:
+        return jsonify({"error": f"Not enough samples: {valid} < window_size={win_size}"}), 400
+
+    feat_rows = []
+    for i in range(n_windows):
+        s_idx = i * win_size
+        e_idx = s_idx + win_size
+        feat = features_from_buffer(
+            ax_all[s_idx:e_idx],
+            ay_all[s_idx:e_idx],
+            az_all[s_idx:e_idx],
+            vs_all[s_idx:e_idx] if include_vs else None,
+        )
+        feat_rows.append(feat)
+
+    # --- Single scaler + model call for all windows ---
+    feat_matrix = _np.vstack(feat_rows)                        # (n_windows, n_features)
+    feat_scaled = _inference._scaler.transform(feat_matrix)    # one call
+    pred_ints   = _inference._model.predict(feat_scaled)       # one call
+
+    confidences = None
+    if hasattr(_inference._model, "predict_proba"):
+        proba       = _inference._model.predict_proba(feat_scaled)
+        confidences = _np.max(proba, axis=1)
+
+    # --- Build result dicts and majority vote ---
+    ts = datetime.now(timezone.utc).isoformat()
+    results = []
+    for i, pred_int in enumerate(pred_ints):
+        label = _inference._int_to_label.get(int(pred_int), f"class_{pred_int}")
+        conf  = round(float(confidences[i]), 4) if confidences is not None else None
+        r = {
+            "ready":          True,
+            "label":          label,
+            "label_int":      int(pred_int),
+            "confidence":     conf,
+            "smoothed_label": label,
+            "inference_ms":   0.0,
+            "timestamp":      ts,
+        }
         results.append(r)
-        if r.get("ready"):
-            _history.append(r)
+        _history.append(r)
 
-    return jsonify({"results": results, "n_processed": len(results)})
+    # Majority vote over all windows -> authoritative batch label
+    from collections import Counter
+    vote_counts = Counter(r["label"] for r in results)
+    batch_label = vote_counts.most_common(1)[0][0]
+    batch_conf  = None
+    if confidences is not None:
+        batch_conf = round(
+            sum(r["confidence"] for r in results if r["label"] == batch_label)
+            / vote_counts[batch_label], 4
+        )
+    for r in results:
+        r["smoothed_label"] = batch_label
 
+    elapsed = round((time.time() - t0) * 1000)
+    log.info(
+        "Batch inference: %d samples -> %d windows -> \"%s\" conf=%.0f%% in %dms",
+        valid, n_windows, batch_label,
+        (batch_conf or 0) * 100, elapsed
+    )
+
+    return jsonify({
+        "results":     results,
+        "n_processed": valid,
+        "batch_label": batch_label,
+        "batch_conf":  batch_conf,
+        "elapsed_ms":  elapsed,
+    })
 
 @app.route("/api/model/info")
 def api_model_info():

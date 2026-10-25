@@ -1,4 +1,4 @@
-﻿/*
+/*
  * gvms_final.ino
  * ==============
  * Ground Vibration Monitoring System (GVMS)
@@ -17,7 +17,7 @@
  *   + Everything else (pins, thresholds, full rich dashboard) unchanged
  *
  * BEFORE FLASHING:
- *   1. Set ML_SERVER_IP to your PC LAN IP  (run ipconfig on Windows)
+ *   1. Set ML_SERVER_IP_FALLBACK to your PC LAN IP  (run ipconfig on Windows)
  *   2. Start the Flask server:  python dashboard/app.py
  *   3. Install ArduinoJson v6 via Arduino Library Manager
  */
@@ -38,15 +38,15 @@
 // WIFI
 // =====================================================
 
-const char* WIFI_SSID = "WIFI_NAME";
-const char* WIFI_PASSWORD = "WIFI_PASSWORD";
+const char* WIFI_SSID = "PT";
+const char* WIFI_PASSWORD = "zaidzaid";
 
 // =====================================================
-// ML SERVER  -- change ML_SERVER_IP to your PC LAN IP
+// ML SERVER  -- change ML_SERVER_IP_FALLBACK to your PC LAN IP
 // =====================================================
 
 const char* ML_SERVER_HOST = "gvms.local";   // mDNS hostname -- no IP needed ever again
-const char* ML_SERVER_IP_FALLBACK = "172.16.55.213"; // fallback if mDNS fails
+const char* ML_SERVER_IP_FALLBACK = "10.83.76.117"; // fallback if mDNS fails
 
 const int   ML_SERVER_PORT = 5000;
 
@@ -299,8 +299,9 @@ void updateOLED() {
 // -- mlHttpTask: runs on Core 0, sends 10-second batch, gets label back --------
 // -- Resolve ML server address via mDNS, fall back to hardcoded IP -----------
 String resolveMLServer() {
-  IPAddress ip;
-  if (MDNS.queryHost(ML_SERVER_HOST, ip, 2000)) {
+  // ESP32 core v3.x: queryHost returns IPAddress directly (no output param)
+  IPAddress ip = MDNS.queryHost(ML_SERVER_HOST, 2000);
+  if (ip != IPAddress(0,0,0,0)) {
     Serial.print("[mDNS] Resolved gvms.local -> "); Serial.println(ip.toString());
     return ip.toString();
   }
@@ -341,70 +342,49 @@ void mlHttpTask(void* param) {
         HTTPClient http;
         http.begin(url);
         http.addHeader("Content-Type", "application/json");
-        http.setTimeout(15000);  // 330-sample batch: allow 15s for Flask + JSON round-trip
+        http.setTimeout(30000);  // 30s -- Flask feature extraction can be slow on first batch
 
         int code = http.POST(body);
 
         if (code == 200) {
           String resp = http.getString();
-          // Response has many results (one per 50-sample window in the batch).
-          // Find the most common smoothed_label = majority vote.
-          DynamicJsonDocument res(16384);
-          if (!deserializeJson(res, resp)) {
-            JsonArray results = res["results"];
-
-            // Count votes for each label
-            String labels[10]; int counts[10]; int numLabels = 0;
-            for (JsonObject r : results) {
-              if (r["ready"] != true) continue;
-              const char* lbl = r["smoothed_label"] | r["label"] | "";
-              if (strlen(lbl) == 0) continue;
-              // find or add label
-              bool found = false;
-              for (int j = 0; j < numLabels; j++) {
-                if (labels[j] == lbl) { counts[j]++; found = true; break; }
-              }
-              if (!found && numLabels < 10) {
-                labels[numLabels] = String(lbl);
-                counts[numLabels] = 1;
-                numLabels++;
-              }
-            }
-
-            // Pick the winner
-            if (numLabels > 0) {
-              int best = 0;
-              for (int j = 1; j < numLabels; j++) {
-                if (counts[j] > counts[best]) best = j;
-              }
-              mlLabel      = labels[best];
-              mlConfidence = (float)counts[best] / max(results.size(), (size_t)1);
+          // Flask returns batch_label + batch_conf at the top level.
+          // StaticJsonDocument<512> is enough - we only read 4 scalar fields.
+          StaticJsonDocument<512> res;
+          DeserializationError jerr = deserializeJson(res, resp);
+          if (!jerr) {
+            const char* lbl  = res["batch_label"] | "";
+            float        conf = res["batch_conf"]  | 0.0f;
+            int          nproc = res["n_processed"] | 0;
+            int          ems   = res["elapsed_ms"]  | 0;
+            if (strlen(lbl) > 0) {
+              mlLabel      = String(lbl);
+              mlConfidence = conf;
               mlReady      = true;
               mlServerOK   = true;
               mlBatchNum++;
-              // Push to recent-batch ring buffer
-              recentBatchLabels[recentBatchHead] = labels[best];
-              recentBatchConf[recentBatchHead]   = mlConfidence;
+              recentBatchLabels[recentBatchHead] = String(lbl);
+              recentBatchConf[recentBatchHead]   = conf;
               recentBatchHead  = (recentBatchHead + 1) % RECENT_BATCH_MAX;
               if (recentBatchCount < RECENT_BATCH_MAX) recentBatchCount++;
-
               Serial.print("[ML] Batch #"); Serial.print(mlBatchNum);
               Serial.print(" -> "); Serial.print(mlLabel);
-              Serial.print("  votes="); Serial.print(counts[best]);
-              Serial.print("/"); Serial.print(results.size());
               Serial.print("  conf="); Serial.print((int)(mlConfidence * 100));
-              Serial.println("%");
+              Serial.print("%  samples="); Serial.print(nproc);
+              Serial.print("  server_ms="); Serial.println(ems);
+            } else {
+              Serial.println("[ML] batch_label missing in response");
+              mlServerOK = false;
             }
+          } else {
+            Serial.print("[ML] JSON parse error: "); Serial.println(jerr.c_str());
+            mlServerOK = false;
           }
         } else {
           mlServerOK = false;
           Serial.print("[ML] HTTP error: "); Serial.println(code);
         }
-
         http.end();
-      } else {
-        Serial.println("[ML] WiFi not connected, skipping batch");
-      }
 
       mlTaskBusy    = false;
       batchRecording = true;           // start the next 10-second batch
@@ -415,10 +395,10 @@ void mlHttpTask(void* param) {
   }
 }
 
-// Called from sensor loop when batch is full � copies buffer, signals task
+// Called from sensor loop when batch is full ? copies buffer, signals task
 void triggerMLSend() {
   if (mlTaskBusy) {
-    // Task still busy from last batch � skip, restart recording
+    // Task still busy from last batch ? skip, restart recording
     batchRecording = true;
     batchCount     = 0;
     batchStartMs   = millis();
@@ -1609,7 +1589,7 @@ void setup() {
     Serial.print("IP Address: ");
     Serial.println(WiFi.localIP());
     Serial.print("ML Server:  http://");
-    Serial.print(ML_SERVER_IP);
+    Serial.print(ML_SERVER_IP_FALLBACK);
     Serial.print(":");
     Serial.println(ML_SERVER_PORT);
   } else {
@@ -1622,7 +1602,7 @@ void setup() {
   xTaskCreatePinnedToCore(
     mlHttpTask,    // function
     "mlHttpTask",  // name
-    16384,         // stack size (bytes) � needs room for JSON + HTTPClient
+    16384,         // stack size (bytes) ? needs room for JSON + HTTPClient
     NULL,          // parameter
     1,             // priority
     &mlTaskHandle, // handle
