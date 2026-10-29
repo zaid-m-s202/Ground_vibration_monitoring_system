@@ -8,7 +8,7 @@
 
 ---
 
-## Project Structure
+## Project Structure 
 
 ```
 ml_IDMP/
@@ -111,6 +111,7 @@ ESP32 (gvms_final.ino)
 
 ## ML Pipeline Design
 
+
 ### Label Assignment
 Labels come **exclusively from filenames**:
 
@@ -211,6 +212,7 @@ Response:
 ```
 `"ready": false` until the rolling buffer has enough samples for one window.
 
+
 ### `POST /api/infer/batch`
 Batch inference — accepts either format:
 ```json
@@ -254,6 +256,8 @@ Install via Arduino Library Manager:
 3. Start Flask: `python dashboard/app.py`
 
 ### Pin Assignments
+
+
 
 | Peripheral | Pin(s)                         |
 |------------|--------------------------------|
@@ -310,6 +314,8 @@ accessible directly at the ESP32's IP address on port 80.
 
 ---
 
+
+
 ## Known Limitations
 
 1. **Single session per class.** The 1.0 accuracy reflects the model
@@ -332,6 +338,7 @@ accessible directly at the ESP32's IP address on port 80.
 
 6. **IP address is hardcoded** in the firmware (`ML_SERVER_IP`). Update it
    whenever your PC's LAN IP changes.
+
 
 ### Additional Data Required for Production
 - At least 5 independent recording sessions per class
