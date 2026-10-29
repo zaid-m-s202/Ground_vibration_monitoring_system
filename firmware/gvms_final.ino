@@ -1,4 +1,4 @@
-/*
+﻿/*
  * gvms_final.ino
  * ==============
  * Ground Vibration Monitoring System (GVMS)
@@ -124,7 +124,7 @@ long sessionAlertCount = 0;
 bool demoMode = false;
 unsigned long demoModeUntil = 0;
 
-#define MAX_EVENTS 20
+#define MAX_EVENTS 200
 #define MAX_THRESHOLD_HISTORY 10
 
 struct ThresholdChange {
@@ -141,6 +141,7 @@ int thresholdHistoryCount = 0;
 
 unsigned long lastSensorRead = 0;
 unsigned long lastLog = 0;
+unsigned long sessionStartMs = 0;   // set in setup(), used to compute SessionElapsed_ms
 
 const unsigned long SENSOR_INTERVAL = 10;    // 100 Hz
 const unsigned long LOG_INTERVAL = 1000;
@@ -512,7 +513,8 @@ void createCSV() {
     File file = SD.open("/earthquake.csv", FILE_WRITE);
 
     if (file) {
-      file.println("Time_ms,AX_raw,AY_raw,AZ_raw,Vibration,Status");
+      // SessionElapsed_ms matches the ML training CSV format exactly
+      file.println("Time_ms,SessionElapsed_ms,AX,AY,AZ,VibrationScore,Status");
       file.close();
       Serial.println("earthquake.csv created");
     } else {
@@ -535,17 +537,15 @@ void saveData() {
   File file = SD.open("/earthquake.csv", FILE_APPEND);
 
   if (file) {
+    unsigned long now     = millis();
+    unsigned long elapsed = now - sessionStartMs;   // SessionElapsed_ms
 
-    file.print(millis());
-    file.print(",");
-    file.print(ax);
-    file.print(",");
-    file.print(ay);
-    file.print(",");
-    file.print(az);
-    file.print(",");
-    file.print(vibration);
-    file.print(",");
+    file.print(now);          file.print(",");
+    file.print(elapsed);      file.print(",");
+    file.print(ax);           file.print(",");
+    file.print(ay);           file.print(",");
+    file.print(az);           file.print(",");
+    file.print(vibration);    file.print(",");
     file.println(earthquake ? "ALERT" : "NORMAL");
 
     file.close();
@@ -816,14 +816,13 @@ canvas{width:100%!important;display:block;}
       Filter:
       <select id="fClass" onchange="applyFilter()" style="background:var(--wht);border:2px solid var(--blk);color:var(--blk);padding:4px 8px;font-size:.7rem;font-family:'Space Mono',monospace;">
         <option value="">All</option>
-        <option>Gentle_Tap</option><option>Hand_Tap</option><option>Multi_Tap</option>
-        <option>MultiHand_Tap</option><option>Walk1</option><option>ALERT</option><option>NORMAL</option>
+        <option>ALERT</option><option>NORMAL</option>
       </select>
       Min vib:
       <input type="number" id="fMinVib" value="0" onchange="applyFilter()" style="background:var(--wht);border:2px solid var(--blk);color:var(--blk);padding:4px 7px;font-size:.7rem;width:70px;font-family:'Space Mono',monospace;">
     </div>
     <table class="htable">
-      <thead><tr><th>Time</th><th>AX</th><th>AY</th><th>AZ</th><th>Vibration</th><th>Status</th><th>Observation</th></tr></thead>
+      <thead><tr><th>#</th><th>Session Time</th><th>AX</th><th>AY</th><th>AZ</th><th>VibScore</th><th>Status</th></tr></thead>
       <tbody id="histTbody"><tr><td colspan="7" style="text-align:center;padding:18px;color:#888;font-family:'Space Mono',monospace;">// Click REFRESH to load SD card data</td></tr></tbody>
     </table>
     <div class="pg"><span id="histPg">Page 1/1</span><button class="hbtn" onclick="hPrev()">PREV</button><button class="hbtn" onclick="hNext()">NEXT</button></div>
@@ -882,8 +881,8 @@ const MAX_PTS=80,POLL_MS=400;
 let axH=[],ayH=[],azH=[],vibH=[],paused=false;
 let sMin=Infinity,sMax=-Infinity,sSum=0,sN=0;
 let darkMode=true,failStreak=0;
-let allHist=[],filtHist=[],hPage=0;
-const HPP=20;
+let allHist=[],hPage=0;
+const HPP=50;
 let mlLogLines=[];
 
 function toggleTheme(){
@@ -1077,35 +1076,66 @@ function drawTilt(axv,ayv){
   ctx.fillStyle='#000';ctx.beginPath();ctx.arc(cx,cy,3,0,2*Math.PI);ctx.fill();
 }
 
-function obsLabel(r){if(r.mlLabel&&r.mlLabel.length>2&&r.mlLabel!=='--'&&r.mlLabel!=='Recording...'&&r.mlLabel!=='Analyzing...')return r.mlLabel;return r.status==='ALERT'?'ALERT':'NORMAL';}
+// History paging — server handles pages, browser just tracks current page number
+let histTotal=0, histTotalPages=1, histCurrentPage=0;
 
-function loadHistory(){
+function fmtElapsed(ms){
+  ms=parseInt(ms)||0;
+  const s=Math.floor(ms/1000),m=Math.floor(s/60),sc=s%60;
+  return m>0?(m+'m '+sc+'s'):(sc+'.'+(Math.floor((ms%1000)/100))+'s');
+}
+
+function loadHistory(page){
+  if(page===undefined) page=0;
+  histCurrentPage=page;
   const tb=document.getElementById('histTbody');
-  tb.innerHTML='<tr><td colspan="7" style="text-align:center;padding:18px;color:var(--muted)">Loading...</td></tr>';
-  fetch('/events').then(r=>r.json()).then(d=>{allHist=d.events||[];hPage=0;applyFilter();drawHistChart();})
-  .catch(()=>{tb.innerHTML='<tr><td colspan="7" style="text-align:center;padding:18px;color:var(--red)">Failed. Is SD card connected?</td></tr>';});
+  tb.innerHTML='<tr><td colspan="7" style="text-align:center;padding:18px;color:#888;font-family:\'Space Mono\',monospace;">Loading page '+(page+1)+'...</td></tr>';
+  const cls=document.getElementById('fClass').value;
+  const minV=document.getElementById('fMinVib').value||0;
+  let url='/events?page='+page;
+  if(cls)   url+='&status='+encodeURIComponent(cls);
+  if(minV)  url+='&minvib='+minV;
+  fetch(url).then(r=>r.json()).then(d=>{
+    allHist=d.events||[];
+    histTotal=d.total||0;
+    histTotalPages=d.pages||1;
+    histCurrentPage=d.page||0;
+    renderHist();
+    drawHistChart();
+  }).catch(()=>{
+    tb.innerHTML='<tr><td colspan="7" style="text-align:center;padding:18px;color:var(--red)">Failed. Is SD card connected?</td></tr>';
+  });
 }
 
 function applyFilter(){
-  const cls=document.getElementById('fClass').value,minV=parseInt(document.getElementById('fMinVib').value)||0;
-  filtHist=allHist.filter(r=>{const ob=obsLabel(r);if(cls&&ob!==cls)return false;if(r.vibration<minV)return false;return true;});
-  hPage=0;renderHist();
+  loadHistory(0);  // server-side filter: reload from page 0 with new params
 }
 
 function renderHist(){
-  const tb=document.getElementById('histTbody'),total=Math.max(1,Math.ceil(filtHist.length/HPP));
-  if(hPage>=total)hPage=total-1;
-  const sl=filtHist.slice(hPage*HPP,(hPage+1)*HPP);
-  document.getElementById('histPg').textContent='Page '+(hPage+1)+'/'+total+' ('+filtHist.length+')';
-  if(!sl.length){tb.innerHTML='<tr><td colspan="7" style="text-align:center;padding:18px;color:var(--muted)">No matching records.</td></tr>';return;}
-  tb.innerHTML=sl.map(r=>{const ob=obsLabel(r),oc=OBS_CLS[ob]||'o-uk';
-    return '<tr><td>'+fmtUp(r.time)+'</td><td>'+r.ax+'</td><td>'+r.ay+'</td><td>'+r.az+'</td>'
-      +'<td>'+r.vibration+'</td>'
-      +'<td><span class="obs '+(r.status==='ALERT'?'o-al':'o-nr')+'">'+r.status+'</span></td>'
-      +'<td><span class="obs '+oc+'">'+ob+'</span></td></tr>';}).join('');
+  const tb=document.getElementById('histTbody');
+  document.getElementById('histPg').textContent=
+    'Page '+(histCurrentPage+1)+'/'+histTotalPages+' ('+histTotal+' rows total)';
+  if(!allHist.length){
+    tb.innerHTML='<tr><td colspan="7" style="text-align:center;padding:18px;color:#888;font-family:\'Space Mono\',monospace;">No records on this page.</td></tr>';
+    return;
+  }
+  const offset=histCurrentPage*50;
+  tb.innerHTML=allHist.map((r,i)=>{
+    const isAlert=r.status==='ALERT';
+    const rowBg=isAlert?'background:#fff5f5;':'';
+    return '<tr style="'+rowBg+'">'
+      +'<td style="color:#aaa;font-size:.65rem;">'+(offset+i+1)+'</td>'
+      +'<td>'+fmtElapsed(r.elapsed)+'</td>'
+      +'<td>'+r.ax+'</td>'
+      +'<td>'+r.ay+'</td>'
+      +'<td>'+r.az+'</td>'
+      +'<td style="font-weight:700;">'+r.vibration+'</td>'
+      +'<td><span class="obs '+(isAlert?'o-al':'o-nr')+'">'+r.status+'</span></td>'
+      +'</tr>';
+  }).join('');
 }
-function hPrev(){if(hPage>0){hPage--;renderHist();}}
-function hNext(){hPage++;renderHist();}
+function hPrev(){if(histCurrentPage>0) loadHistory(histCurrentPage-1);}
+function hNext(){if(histCurrentPage<histTotalPages-1) loadHistory(histCurrentPage+1);}
 
 function drawHistChart(){
   const cv=document.getElementById('histChart');if(!cv)return;
@@ -1171,14 +1201,14 @@ function loadRecentBatches(){
   });
 }
 
-function exportJSON(){const b=new Blob([JSON.stringify(allHist,null,2)],{type:'application/json'});const a=document.createElement('a');a.href=URL.createObjectURL(b);a.download='gvms_history.json';a.click();}
+function exportJSON(){const b=new Blob([JSON.stringify(allHist,null,2)],{type:'application/json'});const a=document.createElement('a');a.href=URL.createObjectURL(b);a.download='gvms_page'+(histCurrentPage+1)+'.json';a.click();}
 
 function clearLog(){
   if(!confirm('Delete SD card log? Cannot be undone.'))return;
   fetch('/clearLog').then(r=>r.json()).then(d=>{
     document.getElementById('sdMsg').textContent=d.success?'Log cleared.':'Failed.';
     document.getElementById('sdMsg').className='msg '+(d.success?'ok':'err');
-    if(d.success){allHist=[];filtHist=[];renderHist();}
+    if(d.success){allHist=[];histTotal=0;histTotalPages=1;histCurrentPage=0;renderHist();}
     toast(d.success?'Log cleared':'Clear failed',d.success);
   });
 }
@@ -1315,79 +1345,117 @@ void handleThresholdHistory() {
 void handleEvents() {
 
   if (!sdOK) {
-    server.send(200, "application/json", "{\"events\":[]}");
+    server.send(200, "application/json", "{\"events\":[],\"total\":0,\"page\":0,\"pages\":1}");
     return;
   }
 
-  File file = SD.open("/earthquake.csv", FILE_READ);
+  // Server-side paging: ?page=0&per=50  (default page 0, 50 rows per page)
+  // We count total rows first (fast — just count newlines), then seek to the
+  // right offset.  Both passes hold the SD only for the duration of the read;
+  // no large arrays allocated in RAM.
+  const int PER_PAGE = 50;
+  int pageReq = 0;
+  if (server.hasArg("page")) pageReq = server.arg("page").toInt();
 
-  if (!file) {
-    server.send(200, "application/json", "{\"events\":[]}");
+  // ── Pass 1: count data rows (skip header) ──────────────────────────────
+  File f = SD.open("/earthquake.csv", FILE_READ);
+  if (!f) {
+    server.send(200, "application/json", "{\"events\":[],\"total\":0,\"page\":0,\"pages\":1}");
+    return;
+  }
+  if (f.available()) f.readStringUntil('\n');  // skip header
+
+  int totalRows = 0;
+  while (f.available()) {
+    f.readStringUntil('\n');
+    totalRows++;
+  }
+  f.close();
+  // Yield so sensor loop can fire between the two SD passes
+  delay(1);
+
+  if (totalRows == 0) {
+    server.send(200, "application/json", "{\"events\":[],\"total\":0,\"page\":0,\"pages\":1}");
     return;
   }
 
-  String eventLines[MAX_EVENTS];
+  int totalPages = (totalRows + PER_PAGE - 1) / PER_PAGE;
+  if (pageReq < 0) pageReq = 0;
+  if (pageReq >= totalPages) pageReq = totalPages - 1;
+
+  int skipRows  = pageReq * PER_PAGE;   // rows to skip after header
+  int readRows  = PER_PAGE;
+
+  // ── Pass 2: open again, skip to page offset, read PER_PAGE lines ───────
+  f = SD.open("/earthquake.csv", FILE_READ);
+  if (!f) {
+    server.send(200, "application/json", "{\"events\":[],\"total\":0,\"page\":0,\"pages\":1}");
+    return;
+  }
+  if (f.available()) f.readStringUntil('\n');  // skip header
+
+  // Skip rows before this page
+  for (int i = 0; i < skipRows && f.available(); i++) {
+    f.readStringUntil('\n');
+  }
+
+  // Read the page rows
+  String lines[PER_PAGE];
   int count = 0;
-
-  if (file.available()) {
-    file.readStringUntil('\n');  // skip header
-  }
-
-  while (file.available()) {
-
-    String line = file.readStringUntil('\n');
+  while (f.available() && count < readRows) {
+    String line = f.readStringUntil('\n');
     line.trim();
-
-    if (line.length() == 0) continue;
-
-    if (line.indexOf("ALERT") >= 0) {   // CSV writes "ALERT"
-
-      if (count < MAX_EVENTS) {
-        eventLines[count] = line;
-        count++;
-      } else {
-        for (int i = 0; i < MAX_EVENTS - 1; i++) {
-          eventLines[i] = eventLines[i + 1];
-        }
-        eventLines[MAX_EVENTS - 1] = line;
-      }
-    }
+    if (line.length() > 0) lines[count++] = line;
   }
+  f.close();
+  // Yield again before building JSON
+  delay(1);
 
-  file.close();
-
-  String json = "{\"events\":[";
+  // ── Build JSON ──────────────────────────────────────────────────────────
+  // CSV: Time_ms,SessionElapsed_ms,AX,AY,AZ,VibrationScore,Status (7 cols)
+  String json = "{\"total\":";
+  json += totalRows;
+  json += ",\"page\":";
+  json += pageReq;
+  json += ",\"pages\":";
+  json += totalPages;
+  json += ",\"events\":[";
+  bool first = true;
 
   for (int i = 0; i < count; i++) {
-
-    String line = eventLines[i];
+    String& line = lines[i];
 
     int p1 = line.indexOf(',');
-    int p2 = line.indexOf(',', p1 + 1);
-    int p3 = line.indexOf(',', p2 + 1);
-    int p4 = line.indexOf(',', p3 + 1);
-    int p5 = line.indexOf(',', p4 + 1);
+    int p2 = (p1 >= 0) ? line.indexOf(',', p1 + 1) : -1;
+    int p3 = (p2 >= 0) ? line.indexOf(',', p2 + 1) : -1;
+    int p4 = (p3 >= 0) ? line.indexOf(',', p3 + 1) : -1;
+    int p5 = (p4 >= 0) ? line.indexOf(',', p4 + 1) : -1;
+    int p6 = (p5 >= 0) ? line.indexOf(',', p5 + 1) : -1;
 
-    if (p1 < 0 || p2 < 0 || p3 < 0 || p4 < 0) continue;
+    if (p1 < 0 || p2 < 0 || p3 < 0 || p4 < 0 || p5 < 0 || p6 < 0) continue;
 
-    String t    = line.substring(0, p1);
-    String vax  = line.substring(p1 + 1, p2);
-    String vay  = line.substring(p2 + 1, p3);
-    String vaz  = line.substring(p3 + 1, p4);
-    String vvib = (p5 > 0) ? line.substring(p4 + 1, p5) : line.substring(p4 + 1);
+    String t       = line.substring(0,      p1);
+    String elapsed = line.substring(p1 + 1, p2);
+    String vax     = line.substring(p2 + 1, p3);
+    String vay     = line.substring(p3 + 1, p4);
+    String vaz     = line.substring(p4 + 1, p5);
+    String vvib    = line.substring(p5 + 1, p6);
+    String vstatus = line.substring(p6 + 1);
+    vstatus.trim();
 
-    json += "{\"time\":"      + t    +
-            ",\"ax\":"        + vax  +
-            ",\"ay\":"        + vay  +
-            ",\"az\":"        + vaz  +
-            ",\"vibration\":" + vvib +
-            ",\"mlLabel\":\"" + mlLabel + "\"}";
+    if (!first) json += ",";
+    first = false;
 
-    if (i < count - 1) json += ",";
+    json += "{\"time\":"       + t        +
+            ",\"elapsed\":"    + elapsed  +
+            ",\"ax\":"         + vax      +
+            ",\"ay\":"         + vay      +
+            ",\"az\":"         + vaz      +
+            ",\"vibration\":"  + vvib     +
+            ",\"status\":\""   + vstatus  + "\"}";
   }
 
   json += "]}";
-
   server.send(200, "application/json", json);
 }
 
@@ -1409,8 +1477,24 @@ void handleDownload() {
     return;
   }
 
+  // Send headers manually so we can stream in chunks.
+  // server.streamFile() holds the loop for the entire file — use chunked
+  // writes with server.handleClient() in between so the sensor loop
+  // keeps running and the OLED doesn't freeze.
   server.sendHeader("Content-Disposition", "attachment; filename=gvms_log.csv");
-  server.streamFile(file, "text/csv");
+  server.sendHeader("Content-Length", String(file.size()));
+  server.setContentLength(file.size());
+  server.send(200, "text/csv", "");
+
+  const size_t CHUNK = 4096;
+  uint8_t buf[CHUNK];
+  while (file.available()) {
+    size_t n = file.read(buf, CHUNK);
+    if (n > 0) server.client().write(buf, n);
+    // Yield: let sensor loop fire between chunks
+    server.handleClient();
+    delay(1);
+  }
   file.close();
 }
 
@@ -1611,6 +1695,7 @@ void setup() {
   Serial.println("ML task: started on Core 0");
   batchStartMs  = millis();
   batchRecording = true;
+  sessionStartMs = millis();   // anchor for SessionElapsed_ms in CSV
   Serial.println("ML batch: recording started (10s batches)");
 
   server.on("/", handleRoot);
